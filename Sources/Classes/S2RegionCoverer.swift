@@ -138,6 +138,11 @@ public class S2RegionCoverer {
 	*/
 	private var result: [S2CellId] = []
 	
+	/// Pre-allocate result array capacity to reduce reallocations
+	private func prepareResult() {
+		result.reserveCapacity(maxCells)
+	}
+
 	struct Candidate {
 		let cell: S2Cell
 		var isTerminal: Bool // Cell should not be expanded further.
@@ -164,7 +169,7 @@ public class S2RegionCoverer {
 		We keep the candidates in a priority queue. We specify a vector to hold the
 		queue entries since for some reason priority_queue<> uses a deque by default.
 	*/
-	private var candidateQueue: [QueueEntry] = []
+	private var candidateQueue = PriorityQueue()
 	
 	/// Default constructor, sets all fields to default values.
 	public init() { }
@@ -275,6 +280,7 @@ public class S2RegionCoverer {
 		// Expand one level at a time until we hit min_level_ to ensure that
 		// we don't skip over it.
 		var numLevels = (Int(candidate.cell.level) < minLevel) ? 1 : levelMod
+		candidate.children.reserveCapacity(1 << (2 * numLevels))
 		let numTerminals = expandChildren(candidate: &candidate, cell: candidate.cell, numLevels: &numLevels)
 		
 		if candidate.children.isEmpty {
@@ -294,7 +300,7 @@ public class S2RegionCoverer {
 			// intersecting children. Finally, we prefer cells that have the smallest
 			// number of children that cannot be refined any further.
 			let priority = -((((Int(candidate.cell.level) << maxChildrenShift) + candidate.children.count) << maxChildrenShift) + numTerminals)
-			candidateQueue.append(QueueEntry(id: priority, candidate: candidate))
+			candidateQueue.insert(QueueEntry(id: priority, candidate: candidate))
 			// logger.info("Push: " + candidate.cell.id() + " (" + priority + ") ");
 		}
 	}
@@ -307,21 +313,24 @@ public class S2RegionCoverer {
 		guard let region = region else { return 0 }
 		
 		numLevels -= 1
-		let childCells = cell.subdivide()
+		var childCellId = cell.cellId.childBegin()
 		var numTerminals = 0
-		for childCell in childCells {
+		for _ in 0..<4 {
+			let childCell = S2Cell(cellId: childCellId)
+
 			if numLevels > 0 {
 				if region.mayIntersect(cell: childCell) {
-					numTerminals += expandChildren(candidate: &candidate, cell: childCell, numLevels: &numLevels)
+					var levelsRemaining = numLevels
+					numTerminals += expandChildren(candidate: &candidate, cell: childCell, numLevels: &levelsRemaining)
 				}
-				continue
-			}
-			if let child = newCandidate(cell: childCell) {
+			} else if let child = newCandidate(cell: childCell) {
 				candidate.children.append(child)
 				if child.isTerminal {
 					numTerminals += 1
 				}
 			}
+
+			childCellId = childCellId.next()
 		}
 		return numTerminals
 	}
@@ -378,12 +387,13 @@ public class S2RegionCoverer {
 		precondition(candidateQueue.isEmpty && result.isEmpty)
 		
 		self.region = region
-		
+
+		prepareResult()
+		candidateQueue.reserveCapacity(maxCells * 4)
 		getInitialCandidates()
-		candidateQueue.sort()
-		
-		while !candidateQueue.isEmpty && (!interiorCovering || result.count < maxCells) {
-			var candidate = candidateQueue.removeFirst().candidate
+
+		while let entry = candidateQueue.extractMax(), (!interiorCovering || result.count < maxCells) {
+			var candidate = entry.candidate
 			if (Int(candidate.cell.level) < minLevel || candidate.children.count == 1
 				|| result.count + (interiorCovering ? 0 : candidateQueue.count) + candidate.children.count <= maxCells) {
 				// Expand this candidate into its children.
@@ -410,4 +420,86 @@ func ==(lhs: S2RegionCoverer.QueueEntry, rhs: S2RegionCoverer.QueueEntry) -> Boo
 
 func <(lhs: S2RegionCoverer.QueueEntry, rhs: S2RegionCoverer.QueueEntry) -> Bool {
 	return lhs.id > rhs.id
+}
+
+private struct PriorityQueue {
+	private var heap: [S2RegionCoverer.QueueEntry] = []
+
+	var isEmpty: Bool {
+		return heap.isEmpty
+	}
+
+	var count: Int {
+		return heap.count
+	}
+
+	mutating func removeAll() {
+		heap.removeAll()
+	}
+
+	/// Reserve capacity for better performance (reduces reallocations)
+	mutating func reserveCapacity(_ capacity: Int) {
+		heap.reserveCapacity(capacity)
+	}
+
+	/// Insert a new entry into the priority queue - O(log N)
+	mutating func insert(_ entry: S2RegionCoverer.QueueEntry) {
+		heap.append(entry)
+		heapifyUp(heap.count - 1)
+	}
+
+	/// Extract the maximum priority entry - O(log N)
+	mutating func extractMax() -> S2RegionCoverer.QueueEntry? {
+		guard !heap.isEmpty else { return nil }
+
+		if heap.count == 1 {
+			return heap.removeLast()
+		}
+
+		let max = heap[0]
+		heap[0] = heap[heap.count - 1]
+		heap.removeLast()
+		heapifyDown(0)
+		return max
+	}
+
+	/// Restore heap property upward (for insert)
+	private mutating func heapifyUp(_ index: Int) {
+		var currentIndex = index
+
+		while currentIndex > 0 {
+			let parentIndex = (currentIndex - 1) / 2
+
+			// Use < for max heap (smaller id = higher priority)
+			if heap[currentIndex].id >= heap[parentIndex].id {
+				break
+			}
+
+			heap.swapAt(currentIndex, parentIndex)
+			currentIndex = parentIndex
+		}
+	}
+
+	/// Restore heap property downward (for extract)
+	private mutating func heapifyDown(_ index: Int) {
+		var currentIndex = index
+
+		while true {
+			let leftChild = 2 * currentIndex + 1
+			let rightChild = 2 * currentIndex + 2
+			var maxIndex = currentIndex
+
+			if leftChild < heap.count && heap[leftChild].id < heap[maxIndex].id {
+				maxIndex = leftChild
+			}
+			if rightChild < heap.count && heap[rightChild].id < heap[maxIndex].id {
+				maxIndex = rightChild
+			}
+
+			if maxIndex == currentIndex { break }
+
+			heap.swapAt(currentIndex, maxIndex)
+			currentIndex = maxIndex
+		}
+	}
 }
