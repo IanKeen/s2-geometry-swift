@@ -117,9 +117,9 @@ public struct S2CellUnion: S2Region {
 			} else {
 				let end = id.childEnd(level: newLevel)
 				
-				var childId = id.childBegin()
+				var childId = id.childBegin(level: newLevel)
 				while childId != end {
-					output.append(id)
+					output.append(childId)
 					childId = childId.next()
 				}
 			}
